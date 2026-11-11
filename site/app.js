@@ -69,7 +69,8 @@ function validateSummary(d){
     if(![1,2].includes(d.schema)||!validTotals(d))throw Error('invalid');
     if(d.schema===2&&(!Array.isArray(d.products)||d.products.length!==2||!['decent_remote','this_cup'].every(p=>d.products.filter(r=>r.product===p&&validTotals(r)).length===1)))throw Error('invalid');
   }
-  if(d.products?.some(p=>p.versions!==undefined&&(!Array.isArray(p.versions)||p.versions.some(v=>!(v.version===null||typeof v.version==='string')||!Number.isInteger(v.installations)||v.installations<0||!Number.isInteger(v.active_30d)||v.active_30d<0||v.active_30d>v.installations)||p.versions.reduce((n,v)=>n+v.installations,0)!==p.total_installations||p.versions.reduce((n,v)=>n+v.active_30d,0)!==p.active_30d)))throw Error('invalid versions');
+  const versionGroups=d.schema===1?[d]:d.products;
+  if(versionGroups?.some(p=>p.versions!==undefined&&(!Array.isArray(p.versions)||p.versions.some(v=>!(v.version===null||typeof v.version==='string')||!Number.isInteger(v.installations)||v.installations<0||!Number.isInteger(v.active_30d)||v.active_30d<0||v.active_30d>v.installations)||p.versions.reduce((n,v)=>n+v.installations,0)!==p.total_installations||p.versions.reduce((n,v)=>n+v.active_30d,0)!==p.active_30d)))throw Error('invalid versions');
   return d;
 }
 async function readSummary(url){const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error('unavailable');return validateSummary(await response.json())}
