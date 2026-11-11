@@ -74,4 +74,4 @@ function validateSummary(d){
   return d;
 }
 async function readSummary(url){const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error('unavailable');return validateSummary(await response.json())}
-readSummary('https://decent-remote-usage.decent-remote-stats.workers.dev/v2/summary').catch(()=>readSummary('./data.json')).then(d=>{data=d;render()}).catch(()=>{failed=true;render()});
+readSummary('https://home.zhouchenxing.com/usage-stats/api/v2/summary').catch(()=>readSummary('./data.json')).then(d=>{data=d;render()}).catch(()=>{failed=true;render()});

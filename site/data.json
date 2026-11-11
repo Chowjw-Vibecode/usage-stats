@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "generated_at": "2026-11-11T03:52:31.000Z",
+  "generated_at": "2026-11-11T13:03:47Z",
   "scope": "reporting installations; not people or all users",
   "total_installations": 3,
   "active_30d": 3,
@@ -54,9 +54,14 @@
       ],
       "versions": [
         {
+          "version": "0.2.34",
+          "installations": 1,
+          "active_30d": 1
+        },
+        {
           "version": null,
-          "installations": 2,
-          "active_30d": 2
+          "installations": 1,
+          "active_30d": 1
         }
       ]
     }
