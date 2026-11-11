@@ -1,0 +1,127 @@
+// Country-level installation counts. No device control or private configuration.
+export const PRODUCTS = ['decent_remote','this_cup'];
+export const UPSERT = `INSERT INTO installations (id_hash,product,country,first_seen,last_seen,version)
+VALUES (?,?,?,?,?,?) ON CONFLICT(id_hash) DO UPDATE SET
+country=CASE WHEN excluded.last_seen>last_seen THEN excluded.country ELSE country END,
+version=CASE WHEN excluded.last_seen>=last_seen AND excluded.version IS NOT NULL THEN excluded.version ELSE version END,
+first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)`;
+export const SUMMARY = `SELECT country,COUNT(*) AS installations,
+SUM(CASE WHEN last_seen>=? THEN 1 ELSE 0 END) AS active_30d
+FROM installations WHERE product='decent_remote'
+GROUP BY country ORDER BY installations DESC,country`;
+export const PRODUCT_SUMMARY = `SELECT product,country,version,COUNT(*) AS installations,
+SUM(CASE WHEN last_seen>=? THEN 1 ELSE 0 END) AS active_30d
+FROM installations GROUP BY product,country,version ORDER BY installations DESC,country`;
+const WEEK = 7 * 86400;
+// SemVer 2.0: core and numeric prerelease identifiers have no leading zeroes.
+const VERSION=/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+function grouped(rows,key) {
+  const groups=new Map();
+  for(const source of rows){
+    const value=source[key],row=groups.get(value)||{[key]:value,installations:0,active_30d:0};
+    row.installations+=Number(source.installations);row.active_30d+=Number(source.active_30d);groups.set(value,row);
+  }
+  return [...groups.values()].sort((a,b)=>b.installations-a.installations||(a[key]===null?1:b[key]===null?-1:String(a[key]).localeCompare(String(b[key]))));
+}
+const CORS = {'access-control-allow-origin':'*'};
+const json = (data, status=200) => new Response(JSON.stringify(data), {
+  status, headers: {...CORS,'content-type':'application/json; charset=utf-8','cache-control':'no-store'}
+});
+function totals(countries) {
+  return {total_installations:countries.reduce((n,r)=>n+Number(r.installations),0),
+    active_30d:countries.reduce((n,r)=>n+Number(r.active_30d),0),countries};
+}
+async function digest(value) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+export async function handle(request, env, now=Math.floor(Date.now()/1000)) {
+  const url = new URL(request.url);
+  if (!env.DB || !env.RATE_LIMITER) return json({error:'not_configured'},503);
+  if (url.protocol !== 'https:') return json({error:'https_required'},426);
+  if (!['/v1/summary','/v2/summary','/v1/check-in'].includes(url.pathname)) return json({error:'not_found'},404);
+  if (request.method === 'OPTIONS') {
+    return new Response(null,{status:204,headers:{...CORS,
+      'access-control-allow-methods':url.pathname==='/v1/check-in'?'POST, DELETE, OPTIONS':'GET, OPTIONS',
+      'access-control-allow-headers':'Content-Type','access-control-max-age':'86400'}});
+  }
+  // Shared per-route limit; no IP addresses or installation identifiers enter the limiter.
+  if (!(await env.RATE_LIMITER.limit({key:url.pathname})).success) return json({error:'rate_limited'},429);
+  if (url.pathname.endsWith('/summary') && request.method === 'GET') {
+    const meta={generated_at:new Date(now*1000).toISOString(),scope:'reporting installations; not people or all users'};
+    if (url.pathname === '/v1/summary') {
+      const {results} = await env.DB.prepare(SUMMARY).bind(now-30*86400).all();
+      return json({schema:1,...meta,...totals(results)});
+    }
+    // One database snapshot supplies both product totals and the combined total.
+    const {results} = await env.DB.prepare(PRODUCT_SUMMARY).bind(now-30*86400).all();
+    const products=PRODUCTS.map(product=>{
+      const rows=results.filter(r=>r.product===product);
+      return {product,...totals(grouped(rows,'country')),versions:grouped(rows,'version')};
+    });
+    const countries=grouped(results,'country');
+    return json({schema:2,...meta,...totals(countries),products});
+  }
+  if (url.pathname !== '/v1/check-in') return json({error:'not_found'},404);
+  if (request.method !== 'POST' && request.method !== 'DELETE') return json({error:'method_not_allowed'},405);
+  if ((request.headers.get('content-type')||'').split(';')[0].trim().toLowerCase() !== 'application/json') return json({error:'json_required'},415);
+  // Stream with a byte cap; do not buffer an arbitrarily large body.
+  const reader=request.body?.getReader();if(!reader)return json({error:'invalid_body'},400);
+  let size=0,parts=[];
+  for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>256){await reader.cancel();return json({error:'too_large'},413)}parts.push(value)}
+  const bytes=new Uint8Array(size);let offset=0;for(const p of parts){bytes.set(p,offset);offset+=p.length}
+  let body;try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}catch{return json({error:'invalid_json'},400)}
+  if(!body||Array.isArray(body)||Object.keys(body).some(k=>!['install_id','product','version'].includes(k))||typeof body.install_id!=='string'||!/^[a-f0-9]{32}$/.test(body.install_id))return json({error:'invalid_installation'},422);
+  const product=Object.hasOwn(body,'product')?body.product:'decent_remote';
+  if(!PRODUCTS.includes(product))return json({error:'invalid_product'},422);
+  const version=Object.hasOwn(body,'version')?body.version:null;
+  if(Object.hasOwn(body,'version')&&(typeof version!=='string'||version.length>64||!VERSION.test(version)))return json({error:'invalid_version'},422);
+  // Preserve old hashes and scope new products independently, including deletion.
+  const id=await digest(product==='decent_remote'?body.install_id:product+':'+body.install_id);
+  if(request.method==='DELETE'){
+    await env.DB.prepare('DELETE FROM installations WHERE id_hash=? AND product=?').bind(id,product).run();
+    return json({deleted:true});
+  }
+  // Only the hosting platform supplies location. Ignore all client country/IP fields.
+  const source=request.cf?.country;
+  const country=typeof source==='string'&&/^[A-Z]{2}$/.test(source)&&!['EU','XX'].includes(source)?source:'ZZ';
+  await env.DB.prepare(UPSERT).bind(id,product,country,now,now,version).run();
+  return json({accepted:true,next_check_in_after_s:WEEK});
+}
+// The domestic service is authoritative after migration. Old clients keep this
+// URL; Cloudflare's source IP goes only to the authenticated domestic service.
+export async function relay(request,env,fetchImpl=fetch) {
+  const url=new URL(request.url),path=url.pathname;
+  if(!['/v1/summary','/v2/summary','/v1/check-in'].includes(path))return json({error:'not_found'},404);
+  if(url.protocol!=='https:')return json({error:'https_required'},426);
+  const writes=path==='/v1/check-in';
+  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{...CORS,'access-control-allow-methods':writes?'POST, DELETE, OPTIONS':'GET, OPTIONS','access-control-allow-headers':'Content-Type'}});
+  if(!(writes?['POST','DELETE']:['GET']).includes(request.method))return json({error:'method_not_allowed'},405);
+  if(!env.RELAY_TOKEN||!env.RATE_LIMITER)return json({error:'not_configured'},503);
+  if(!(await env.RATE_LIMITER.limit({key:path})).success)return json({error:'rate_limited'},429);
+  const origin=new URL(env.STATS_ORIGIN);
+  if(origin.protocol!=='https:'||origin.username||origin.password||origin.search||origin.hash)throw Error('Invalid origin');
+  const headers={};let body;
+  if(writes){
+    if((request.headers.get('content-type')||'').split(';')[0].trim().toLowerCase()!=='application/json')return json({error:'json_required'},415);
+    const reader=request.body?.getReader();if(!reader)return json({error:'invalid_body'},400);
+    let size=0,parts=[];
+    for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>256){await reader.cancel();return json({error:'too_large'},413)}parts.push(value)}
+    body=new Uint8Array(size);let offset=0;for(const part of parts){body.set(part,offset);offset+=part.length}
+    const country=request.cf?.country;
+    headers['Content-Type']='application/json';
+    headers['X-Usage-Relay-Key']=env.RELAY_TOKEN;
+    headers['X-Usage-Country']=typeof country==='string'&&/^[A-Z]{2}$/.test(country)&&!['EU','XX'].includes(country)?country:'ZZ';
+    const address=request.headers.get('CF-Connecting-IP');
+    if(address&&address.length<=45&&/^[0-9a-fA-F:.]+$/.test(address))headers['X-Usage-IP']=address;
+  }
+  // Workers implements manual/follow, but rejects the browser's "error" mode.
+  const response=await fetchImpl(origin.href.replace(/\/$/,'')+path,{method:request.method,headers,body,redirect:'manual',signal:AbortSignal.timeout(8000)});
+  if(response.status>=300&&response.status<400)return json({error:'temporarily_unavailable'},503);
+  if(!(response.headers.get('content-type')||'').includes('application/json')){
+    console.error('usage_upstream_non_json',response.status);
+    return json({error:'temporarily_unavailable'},503);
+  }
+  return json(await response.json(),response.status);
+}
+export default {async fetch(request,env){try{return await (env.STATS_ORIGIN?relay(request,env):handle(request,env))}catch(error){console.error('usage_request_failed',error?.name||'Error');return json({error:'temporarily_unavailable'},503)}}};

@@ -1,17 +1,65 @@
 {
   "schema": 2,
-  "generated_at": "2026-11-11T13:03:47Z",
+  "generated_at": "2026-11-11T15:01:13Z",
   "scope": "reporting installations; not people or all users",
   "total_installations": 3,
   "active_30d": 3,
   "countries": [
     {
-      "country": "SG",
-      "installations": 2,
-      "active_30d": 2
+      "country": "CN",
+      "installations": 1,
+      "active_30d": 1
     },
     {
       "country": "HK",
+      "installations": 1,
+      "active_30d": 1
+    },
+    {
+      "country": "SG",
+      "installations": 1,
+      "active_30d": 1
+    }
+  ],
+  "regions": [
+    {
+      "country": "CN",
+      "region": null,
+      "installations": 1,
+      "active_30d": 1
+    },
+    {
+      "country": "HK",
+      "region": null,
+      "installations": 1,
+      "active_30d": 1
+    },
+    {
+      "country": "SG",
+      "region": null,
+      "installations": 1,
+      "active_30d": 1
+    }
+  ],
+  "cities": [
+    {
+      "country": "CN",
+      "region": null,
+      "city": null,
+      "installations": 1,
+      "active_30d": 1
+    },
+    {
+      "country": "HK",
+      "region": null,
+      "city": null,
+      "installations": 1,
+      "active_30d": 1
+    },
+    {
+      "country": "SG",
+      "region": null,
+      "city": null,
       "installations": 1,
       "active_30d": 1
     }
@@ -24,6 +72,23 @@
       "countries": [
         {
           "country": "SG",
+          "installations": 1,
+          "active_30d": 1
+        }
+      ],
+      "regions": [
+        {
+          "country": "SG",
+          "region": null,
+          "installations": 1,
+          "active_30d": 1
+        }
+      ],
+      "cities": [
+        {
+          "country": "SG",
+          "region": null,
+          "city": null,
           "installations": 1,
           "active_30d": 1
         }
@@ -42,19 +107,49 @@
       "active_30d": 2,
       "countries": [
         {
-          "country": "HK",
+          "country": "CN",
           "installations": 1,
           "active_30d": 1
         },
         {
-          "country": "SG",
+          "country": "HK",
+          "installations": 1,
+          "active_30d": 1
+        }
+      ],
+      "regions": [
+        {
+          "country": "CN",
+          "region": null,
+          "installations": 1,
+          "active_30d": 1
+        },
+        {
+          "country": "HK",
+          "region": null,
+          "installations": 1,
+          "active_30d": 1
+        }
+      ],
+      "cities": [
+        {
+          "country": "CN",
+          "region": null,
+          "city": null,
+          "installations": 1,
+          "active_30d": 1
+        },
+        {
+          "country": "HK",
+          "region": null,
+          "city": null,
           "installations": 1,
           "active_30d": 1
         }
       ],
       "versions": [
         {
-          "version": "0.2.34",
+          "version": "0.2.39",
           "installations": 1,
           "active_30d": 1
         },
