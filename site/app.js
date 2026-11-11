@@ -1,4 +1,4 @@
-let language='en',data=null,failed=false,product='all';
+let language='zh',data=null,failed=false,product='all';
 const $=id=>document.getElementById(id);
 const words={
   en:{title:'Used around the world',intro:'Country and region totals for reporting installations.',product:'Product',all:'All products',this_cup:'This Cup',total:'Installations counted',active:'Active in 30 days',regions:'Countries / regions',country:'Country / region',count:'Total',recent:'Active · 30d',pending:'Statistics are not available yet.',categoryPending:'Statistics for this product are not available yet.',legacy:'This snapshot covers Decent Remote only. This Cup statistics are not available yet.',empty:'No installations have been counted for this selection yet.',failed:'Statistics could not be loaded. Please try again later.',updated:'Updated',note:'Counts represent installations, not people or physical devices. Each product is counted separately. VPNs, browser storage and reinstalls can affect the figures.',unknown:'Unknown'},
@@ -22,7 +22,7 @@ function render(){
   $('product').options[0].textContent=w.all;
   $('product').options[2].textContent=w.this_cup;
   for(const [id,key]of Object.entries({'total-label':'total','active-label':'active','regions-label':'regions','country-label':'country','count-label':'count','recent-label':'recent','note':'note'}))$(id).textContent=w[key];
-  $('rows').replaceChildren();$('table').hidden=true;$('updated').textContent='';
+  $('rows').replaceChildren();$('version-rows').replaceChildren();$('version-section').hidden=true;$('table').hidden=true;$('updated').textContent='';
   for(const id of ['total','active','regions'])$(id).textContent='—';
   if(failed){$('message').textContent=w.failed;return}
   if(!data||data.status==='not_deployed'){$('message').textContent=w.pending;return}
@@ -42,16 +42,35 @@ function render(){
     bar.className='bar';fill.style.width=(100*r.installations/max)+'%';bar.append(fill);name.append(bar);
     total.textContent=r.installations.toLocaleString();active.textContent=r.active_30d.toLocaleString();tr.append(name,total,active);$('rows').append(tr);
   }
+  $('version-section').hidden=false;
+  $('version-title').textContent=language==='zh'?'版本分布':'Versions';
+  $('version-note').textContent=language==='zh'?'按每个安装最近上报的版本计数。未提供版本号的旧客户端列为未知版本。':'Latest reported version per installation. Older clients without version information are shown as unknown.';
+  $('version-product').textContent=language==='zh'?'产品':'Product';
+  $('version-label').textContent=language==='zh'?'版本':'Version';
+  $('version-count').textContent=w.count;$('version-active').textContent=w.recent;
+  const groups=data.schema===2?data.products:[{product:'decent_remote',...data}];
+  for(const group of groups.filter(g=>product==='all'||g.product===product)){
+    const versions=Array.isArray(group.versions)?group.versions:[{version:null,installations:group.total_installations,active_30d:group.active_30d}];
+    for(const row of versions){
+      if(!row.installations)continue;
+      const tr=document.createElement('tr');
+      for(const value of [group.product==='this_cup'?w.this_cup:'Decent Remote',row.version??(language==='zh'?'未知版本':'Unknown version'),row.installations.toLocaleString(),row.active_30d.toLocaleString()]){const td=document.createElement('td');td.textContent=value;tr.append(td)}
+      $('version-rows').append(tr);
+    }
+  }
   $('updated').textContent=w.updated+' '+new Date(data.generated_at).toLocaleString(language==='en'?'en-GB':'zh-CN');
 }
 $('language').onclick=()=>{language=language==='en'?'zh':'en';render()};
 $('product').onchange=()=>{product=$('product').value;render()};
 render();
-async function readSummary(url){const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error('unavailable');return response.json()}
-readSummary('https://decent-remote-usage.decent-remote-stats.workers.dev/v2/summary').catch(()=>readSummary('./data.json')).then(d=>{
+function validateSummary(d){
+  if(!d||typeof d!=='object')throw Error('invalid');
   if(d.status!=='not_deployed'){
     if(![1,2].includes(d.schema)||!validTotals(d))throw Error('invalid');
     if(d.schema===2&&(!Array.isArray(d.products)||d.products.length!==2||!['decent_remote','this_cup'].every(p=>d.products.filter(r=>r.product===p&&validTotals(r)).length===1)))throw Error('invalid');
   }
-  data=d;render();
-}).catch(()=>{failed=true;render()});
+  if(d.products?.some(p=>p.versions!==undefined&&(!Array.isArray(p.versions)||p.versions.some(v=>!(v.version===null||typeof v.version==='string')||!Number.isInteger(v.installations)||v.installations<0||!Number.isInteger(v.active_30d)||v.active_30d<0||v.active_30d>v.installations)||p.versions.reduce((n,v)=>n+v.installations,0)!==p.total_installations||p.versions.reduce((n,v)=>n+v.active_30d,0)!==p.active_30d)))throw Error('invalid versions');
+  return d;
+}
+async function readSummary(url){const response=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error('unavailable');return validateSummary(await response.json())}
+readSummary('https://decent-remote-usage.decent-remote-stats.workers.dev/v2/summary').catch(()=>readSummary('./data.json')).then(d=>{data=d;render()}).catch(()=>{failed=true;render()});
