@@ -1,14 +1,14 @@
 {
   "schema": 2,
-  "generated_at": "2026-11-11T15:01:13Z",
+  "generated_at": "2026-11-12T00:39:05Z",
   "scope": "reporting installations; not people or all users",
-  "total_installations": 3,
-  "active_30d": 3,
+  "total_installations": 4,
+  "active_30d": 4,
   "countries": [
     {
       "country": "CN",
-      "installations": 1,
-      "active_30d": 1
+      "installations": 2,
+      "active_30d": 2
     },
     {
       "country": "HK",
@@ -22,6 +22,12 @@
     }
   ],
   "regions": [
+    {
+      "country": "CN",
+      "region": "Jiangxi",
+      "installations": 1,
+      "active_30d": 1
+    },
     {
       "country": "CN",
       "region": null,
@@ -42,6 +48,13 @@
     }
   ],
   "cities": [
+    {
+      "country": "CN",
+      "region": "Jiangxi",
+      "city": "Taohua",
+      "installations": 1,
+      "active_30d": 1
+    },
     {
       "country": "CN",
       "region": null,
@@ -103,13 +116,13 @@
     },
     {
       "product": "this_cup",
-      "total_installations": 2,
-      "active_30d": 2,
+      "total_installations": 3,
+      "active_30d": 3,
       "countries": [
         {
           "country": "CN",
-          "installations": 1,
-          "active_30d": 1
+          "installations": 2,
+          "active_30d": 2
         },
         {
           "country": "HK",
@@ -118,6 +131,12 @@
         }
       ],
       "regions": [
+        {
+          "country": "CN",
+          "region": "Jiangxi",
+          "installations": 1,
+          "active_30d": 1
+        },
         {
           "country": "CN",
           "region": null,
@@ -132,6 +151,13 @@
         }
       ],
       "cities": [
+        {
+          "country": "CN",
+          "region": "Jiangxi",
+          "city": "Taohua",
+          "installations": 1,
+          "active_30d": 1
+        },
         {
           "country": "CN",
           "region": null,
@@ -150,8 +176,8 @@
       "versions": [
         {
           "version": "0.2.39",
-          "installations": 1,
-          "active_30d": 1
+          "installations": 2,
+          "active_30d": 2
         },
         {
           "version": null,

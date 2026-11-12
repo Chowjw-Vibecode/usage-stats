@@ -1,8 +1,11 @@
 """Installation counts with latest private IP/location; public output is aggregated."""
 import hashlib
+import datetime
+import gzip
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -15,6 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PRODUCTS = ('decent_remote', 'this_cup')
+CUP_MAX_BODY = 4 * 1024 * 1024
+CUP_PAYLOAD_FIELDS = {'profile','workflow','measurements','result','bean','taste','device','versions'}
+SENSITIVE_KEY_PARTS = ('token','password','secret','accesskey','apikey','authorization','credential','serialnumber','macaddress','deviceid')
+PRIVATE_ADDRESS_KEYS = {'ip','ipaddress','localip','baseurl','hostname','address'}
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?')
 UPSERT = """INSERT INTO installations
 (id_hash,product,country,first_seen,last_seen,version,region,city,last_ip,ip_updated_at)
@@ -53,6 +60,86 @@ def localized_name(value):
     if not isinstance(names, dict):
         return None
     return place_name(names.get('zh-CN') or names.get('en'))
+
+
+class EventConflict(ValueError):
+    pass
+
+
+def unique_object(pairs):
+    value = {}
+    for key,child in pairs:
+        if key in value:
+            raise ValueError('duplicate_json_key')
+        value[key] = child
+    return value
+
+
+def validate_cup_event(body):
+    fields = {'schema','event_id','install_id','product','shot_id','event_type','occurred_at','payload'}
+    if not isinstance(body,dict) or set(body) != fields or type(body['schema']) is not int or body['schema'] != 1:
+        raise ValueError('invalid_cup_event')
+    if not isinstance(body['event_id'],str) or not re.fullmatch('[a-f0-9]{64}',body['event_id']):
+        raise ValueError('invalid_cup_event')
+    if not isinstance(body['install_id'],str) or not re.fullmatch('[a-f0-9]{32}',body['install_id']) or body['product'] != 'this_cup':
+        raise ValueError('invalid_cup_event')
+    shot = body['shot_id']
+    if not isinstance(shot,str) or not shot.strip() or len(shot)>512 or any(unicodedata.category(c).startswith('C') for c in shot):
+        raise ValueError('invalid_cup_event')
+    if body['event_type'] not in ('shot_completed','assessment_saved'):
+        raise ValueError('invalid_cup_event')
+    at = body['occurred_at']
+    if not isinstance(at,str) or len(at)>64:
+        raise ValueError('invalid_cup_event')
+    try:
+        # Decaid can store host-local ISO timestamps with no timezone. Preserve
+        # that original representation rather than silently interpreting it.
+        if 'T' not in at:
+            raise ValueError()
+        datetime.datetime.fromisoformat(at.replace('Z','+00:00'))
+    except ValueError:
+        raise ValueError('invalid_cup_event') from None
+    payload = body['payload']
+    if not isinstance(payload,dict) or not payload or set(payload)-CUP_PAYLOAD_FIELDS:
+        raise ValueError('invalid_cup_event')
+    pending = [(payload,0)]
+    while pending:
+        value,depth = pending.pop()
+        if depth>32:
+            raise ValueError('invalid_cup_event')
+        if isinstance(value,dict):
+            for key,child in value.items():
+                if not isinstance(key,str) or not key or len(key)>256 or any(ord(c)<32 for c in key):
+                    raise ValueError('invalid_cup_event')
+                normalized_key = re.sub(r'[^a-z0-9]','',key.lower())
+                if normalized_key in PRIVATE_ADDRESS_KEYS or any(part in normalized_key for part in SENSITIVE_KEY_PARTS):
+                    raise ValueError('sensitive_cup_field')
+                pending.append((child,depth+1))
+        elif isinstance(value,list):
+            pending.extend((child,depth+1) for child in value)
+        elif isinstance(value,float):
+            if not math.isfinite(value):
+                raise ValueError('invalid_cup_event')
+        elif isinstance(value,str):
+            try:
+                value.encode('utf-8')
+            except UnicodeError:
+                raise ValueError('invalid_cup_event') from None
+        elif value is not None and type(value) not in (str,int,bool):
+            raise ValueError('invalid_cup_event')
+    versions = payload.get('versions')
+    if versions is not None and not isinstance(versions,dict):
+        raise ValueError('invalid_cup_event')
+    version = versions.get('onecup') if isinstance(versions,dict) else None
+    if version is not None and (not isinstance(version,str) or len(version)>64 or not VERSION.fullmatch(version)):
+        raise ValueError('invalid_version')
+    device = payload.get('device')
+    if device is not None and not isinstance(device,dict):
+        raise ValueError('invalid_cup_event')
+    machine_id = device.get('machine_id') if isinstance(device,dict) else None
+    if machine_id is not None and (not isinstance(machine_id,str) or not re.fullmatch('[a-f0-9]{64}',machine_id)):
+        raise ValueError('invalid_cup_event')
+    return version
 
 
 
@@ -127,6 +214,43 @@ class Store:
             result['products'] = [{'product': p, **totals([r for r in rows if r[0] == p]), 'versions': group([r for r in rows if r[0] == p], (2,), ('version',))} for p in PRODUCTS]
         return result
 
+    def cup_event(self,body,location,now):
+        validate_cup_event(body)
+        digest = hashlib.sha256(('this_cup:'+body['install_id']).encode()).hexdigest()
+        machine_id = (body['payload'].get('device') or {}).get('machine_id')
+        canonical = json.dumps(body,ensure_ascii=True,separators=(',',':'),sort_keys=True,allow_nan=False).encode()
+        content_hash = hashlib.sha256(canonical).hexdigest()
+        payload = gzip.compress(json.dumps(body['payload'],ensure_ascii=False,separators=(',',':'),sort_keys=True,allow_nan=False).encode(),mtime=0)
+        loc = location if isinstance(location,dict) else {}
+        address = public_ip(loc.get('last_ip'))
+        country = country_code(loc.get('country'))
+        with self.connect() as db:
+            # Serialize duplicate detection with insertion. Concurrent retries
+            # cannot either duplicate an event or partially update installation.
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('SELECT content_sha256 FROM cup_events WHERE event_id=?',(body['event_id'],)).fetchone()
+            if existing is not None:
+                if existing[0] != content_hash:
+                    raise EventConflict('event_conflict')
+                return {'accepted':True,'event_id':body['event_id'],'duplicate':True}
+            db.execute('INSERT INTO cup_events (event_id,installation_hash,machine_id,shot_id,type,occurred_at,received_at,content_sha256,payload_gzip,source_ip,country,region,city) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (body['event_id'],digest,machine_id,body['shot_id'],body['event_type'],body['occurred_at'],now,content_hash,payload,address,country,place_name(loc.get('region')),place_name(loc.get('city'))))
+            # The cup's version describes when it was made, not necessarily
+            # the client currently uploading a previously offline queue.
+            db.execute(UPSERT,(digest,'this_cup',country,now,now,None,place_name(loc.get('region')),place_name(loc.get('city')),address,now if address else None))
+        return {'accepted':True,'event_id':body['event_id'],'duplicate':False}
+
+    def read_cup_event(self,event_id):
+        """Private analysis helper; never exposed by the HTTP handler."""
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute('SELECT * FROM cup_events WHERE event_id=?',(event_id,)).fetchone()
+        if row is None:
+            return None
+        event = dict(row)
+        event['payload'] = json.loads(gzip.decompress(event.pop('payload_gzip')))
+        return event
+
 
 class Service:
     def __init__(self, store, lookup, relay_hash=''):
@@ -200,7 +324,7 @@ def handler(service):
 
         def process(self):
             path = self.path.split('?', 1)[0]
-            if path not in ('/v1/summary', '/v2/summary', '/v1/check-in'):
+            if path not in ('/v1/summary', '/v2/summary', '/v1/check-in','/v1/cup-events'):
                 return self.reply(404, {'error': 'not_found'})
             if self.command == 'OPTIONS':
                 return self.reply(204)
@@ -208,29 +332,37 @@ def handler(service):
                 return self.reply(429, {'error': 'rate_limited'})
             if path.endswith('/summary') and self.command == 'GET':
                 return self.reply(200, service.store.summary(2 if path.startswith('/v2/') else 1, int(time.time())))
-            if path != '/v1/check-in' or self.command not in ('POST', 'DELETE'):
+            cup = path == '/v1/cup-events'
+            if not (cup and self.command=='POST' or path=='/v1/check-in' and self.command in ('POST','DELETE')):
                 return self.reply(405, {'error': 'method_not_allowed'})
+            if cup:
+                self.connection.settimeout(30)
             if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
                 return self.reply(415, {'error': 'json_required'})
             if self.headers.get('Transfer-Encoding'):
                 return self.reply(400, {'error': 'invalid_body'})
+            if cup and self.headers.get('Content-Encoding','identity').strip().lower() != 'identity':
+                return self.reply(415, {'error':'encoding_not_supported'})
             try:
                 length = int(self.headers.get('Content-Length', '0'))
             except ValueError:
                 return self.reply(400, {'error': 'invalid_body'})
-            if length <= 0 or length > 256:
-                return self.reply(413 if length > 256 else 400, {'error': 'too_large' if length > 256 else 'invalid_body'})
+            maximum = CUP_MAX_BODY if cup else 256
+            if length <= 0 or length > maximum:
+                return self.reply(413 if length > maximum else 400, {'error': 'too_large' if length > maximum else 'invalid_body'})
             raw = self.rfile.read(length)
             if len(raw) != length:
                 return self.reply(400, {'error': 'invalid_body'})
             try:
-                body = json.loads(raw)
-            except (ValueError, UnicodeError):
+                body = json.loads(raw,object_pairs_hook=unique_object if cup else None)
+            except (ValueError, UnicodeError, RecursionError):
                 return self.reply(400, {'error': 'invalid_json'})
             if self.command == 'DELETE':
                 service.authenticate_relay(self.headers)
                 return self.reply(200, service.store.check_in(body, 'ZZ', int(time.time()), delete=True))
             location = service.location(self.headers)
+            if cup:
+                return self.reply(200,service.store.cup_event(body,location,int(time.time())))
             return self.reply(200, service.store.check_in(body, location['country'], int(time.time()), location=location))
 
         def do_GET(self):
@@ -238,9 +370,11 @@ def handler(service):
                 self.process()
             except PermissionError:
                 self.reply(403, {'error': 'invalid_relay'})
+            except EventConflict:
+                self.reply(409, {'error':'event_conflict'})
             except ValueError as exc:
                 message = str(exc)
-                self.reply(422, {'error': message if message in ('invalid_installation', 'invalid_product', 'invalid_version', 'invalid_country') else 'invalid_request'})
+                self.reply(422, {'error': message if message in ('invalid_installation', 'invalid_product', 'invalid_version', 'invalid_country','invalid_cup_event','sensitive_cup_field') else 'invalid_request'})
             except Exception:
                 self.reply(503, {'error': 'temporarily_unavailable'})
 
